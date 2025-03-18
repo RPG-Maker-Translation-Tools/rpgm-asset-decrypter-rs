@@ -1,0 +1,9 @@
+[package]
+name = "rpgm-asset-decrypter"
+version = "1.0.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.5.32", features = ["cargo", "derive"] }
+clap_derive = "4.5.32"
+asset-decrypter = { package = "rpgm-asset-decrypter-lib", version = "1.0.0" }
