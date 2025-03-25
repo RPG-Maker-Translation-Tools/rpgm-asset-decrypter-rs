@@ -10,7 +10,9 @@ Get the binaries in Releases section.
 
 ```bash
 asset-decrypter decrypt --engine mv -i "./rpg-maker-mv-game/www/img/tilesets"
-asset-decrypter encrypt --encryption-key "d41d8cd98f00b204e9800998ecf8427e" --engine mv -i "./decrypted-images"
+
+# Uses default key, provide manually using `--key` if game has different key.
+asset-decrypter encrypt --engine mv -i "./decrypted-images"
 ```
 
 ## License
