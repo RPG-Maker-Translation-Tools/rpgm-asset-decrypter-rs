@@ -3,134 +3,126 @@ use clap::{Parser, Subcommand, crate_version, value_parser};
 use std::{
     fs::{read, read_dir, read_to_string, write},
     path::PathBuf,
+    process::exit,
 };
+
+const DEFAULT_KEY: &str = "d41d8cd98f00b204e9800998ecf8427e";
 
 #[derive(Parser)]
 #[command(version = crate_version!(), about = "Decrypt/encrypt RPG Maker MV/MZ audio and image assets.")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
-
-    /// Encryption key for `encrypt` command or `decrypt` when decrypting audio files. Can be also found in System.json file
+    /// Encryption key for encrypt/decrypt operations
     #[arg(short = 'e', long, global = true)]
-    encryption_key: Option<String>,
-
-    /// Game engine.
+    key: Option<String>,
+    /// Game engine ("mv" or "mz")
     #[arg(short = 'E', long, value_parser = ["mv", "mz"], global = true)]
     engine: Option<String>,
-
-    /// Path to the input directory.
+    /// Input directory
     #[arg(short, long, default_value = "./", value_parser = value_parser!(PathBuf), hide_default_value = true, global = true)]
     input_dir: PathBuf,
-
-    /// Path to the output directory.
+    /// Output directory
     #[arg(short, long, default_value = "./", value_parser = value_parser!(PathBuf), hide_default_value = true, global = true)]
     output_dir: PathBuf,
-
-    /// Encrypted image file path or System.json path to extract key from when using extract-key command.
+    /// File path (for single file processing or key extraction)
     #[arg(short, long, value_parser = value_parser!(PathBuf), global = true)]
     file: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Encrypt the files.
     Encrypt,
-    /// Decrypt the files.
     Decrypt,
-    /// Extract the key from encrypted image file. Requires --file argument.
     ExtractKey,
 }
 
 fn main() {
     let cli: Cli = Cli::parse();
-
-    if cli.engine.is_none() {
+    let engine: String = cli.engine.unwrap_or_else(|| {
         eprintln!("--engine argument is not specified.");
-        return;
+        exit(1);
+    });
+
+    let mut decrypter: Decrypter = if cli.key.is_none() && matches!(cli.command, Commands::Encrypt)
+    {
+        Decrypter::new(Some(String::from(DEFAULT_KEY)))
+    } else {
+        Decrypter::new(cli.key)
     };
 
-    let engine: String = cli.engine.unwrap();
-
-    let mut decrypter: Decrypter = Decrypter::new(cli.encryption_key);
-
-    if let Commands::ExtractKey = cli.command {
-        if let Some(file) = cli.file {
+    match cli.command {
+        Commands::ExtractKey => {
+            let file: PathBuf = cli.file.unwrap_or_else(|| {
+                eprintln!("--file argument is not specified.");
+                exit(1);
+            });
             let key: String = if file.extension().unwrap() == "json" {
-                let content: String = read_to_string(file).unwrap();
-                let encryption_key_index: usize = content.rfind("encryptionKey").unwrap();
-                let after_encryption_key: &str =
-                    &content[encryption_key_index + "encryptionKey\":".len()..];
-                let starting_quote_index: usize = after_encryption_key.find('"').unwrap();
-                after_encryption_key[starting_quote_index + 1
-                    ..starting_quote_index + 1 + "d41d8cd98f00b204e9800998ecf8427e".len()]
-                    .to_owned()
+                let content: String = read_to_string(&file).unwrap();
+                let index: usize =
+                    content.rfind("encryptionKey").unwrap() + "encryptionKey\":".len();
+                content[index..].trim().trim_matches('"')[..32].to_string()
             } else {
-                let buf: Vec<u8> = read(file).unwrap();
-
+                let buf: Vec<u8> = read(&file).unwrap();
                 decrypter.set_key_from_image(&buf);
                 decrypter.key()
             };
-
             println!("Encryption key: {key}");
-            return;
-        } else {
-            eprintln!("--file argument is not specified.");
-            return;
         }
-    }
-
-    let file_extensions: &[&str] = match cli.command {
-        Commands::Encrypt => &["png", "ogg", "m4a"],
-        Commands::Decrypt => &["rpgmvp", "rpgmvo", "rpgmvm", "ogg_", "png_", "m4a_"],
-        Commands::ExtractKey => &[],
-    };
-
-    let entries = read_dir(&cli.input_dir)
-        .unwrap()
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            path.extension()
-                .and_then(|ext| ext.to_owned().into_string().ok())
-                .filter(|ext| file_extensions.contains(&ext.as_str()))
-                .map(|ext| (path, ext.to_string()))
-        });
-
-    for (path, ext) in entries {
-        let data = read(&path).unwrap();
-
-        let (processed_data, new_ext) = match cli.command {
-            Commands::Encrypt => {
-                let encrypted: Vec<u8> = decrypter.encrypt(&data);
-                let new_ext: &str = match (engine.as_str(), ext.as_str()) {
-                    ("mv", "png") => "rpgmvp",
-                    ("mv", "ogg") => "rpgmvo",
-                    ("mv", "m4a") => "rpgmvm",
-                    ("mz", "png") => "png_",
-                    ("mz", "ogg") => "ogg_",
-                    ("mz", "m4a") => "m4a_",
+        Commands::Decrypt | Commands::Encrypt => {
+            let mut process_file = |file: &PathBuf| {
+                let data: Vec<u8> = read(file).unwrap();
+                let (processed, new_ext) = match cli.command {
+                    Commands::Decrypt => {
+                        let decrypted: Vec<u8> = decrypter.decrypt(&data);
+                        let ext: &str = file.extension().unwrap().to_str().unwrap();
+                        let new_ext: &str = match ext {
+                            "rpgmvp" | "png_" => "png",
+                            "rpgmvo" | "ogg_" => "ogg",
+                            "rpgmvm" | "m4a_" => "m4a",
+                            _ => unreachable!(),
+                        };
+                        (decrypted, new_ext)
+                    }
+                    Commands::Encrypt => {
+                        let encrypted: Vec<u8> = decrypter.encrypt(&data);
+                        let ext: &str = file.extension().unwrap().to_str().unwrap();
+                        let new_ext: &str = match (engine.as_str(), ext) {
+                            ("mv", "png") => "rpgmvp",
+                            ("mv", "ogg") => "rpgmvo",
+                            ("mv", "m4a") => "rpgmvm",
+                            ("mz", "png") => "png_",
+                            ("mz", "ogg") => "ogg_",
+                            ("mz", "m4a") => "m4a_",
+                            _ => unreachable!(),
+                        };
+                        (encrypted, new_ext)
+                    }
                     _ => unreachable!(),
                 };
-                (encrypted, new_ext)
-            }
-            Commands::Decrypt => {
-                let decrypted: Vec<u8> = decrypter.decrypt(&data);
-                let new_ext: &str = match ext.as_str() {
-                    "rpgmvp" | "png_" => "png",
-                    "rpgmvo" | "ogg_" => "ogg",
-                    "rpgmvm" | "m4a_" => "m4a",
+                let output_file: PathBuf = cli
+                    .output_dir
+                    .join(PathBuf::from(file.file_name().unwrap()).with_extension(new_ext));
+                write(output_file, processed).unwrap();
+            };
+
+            if let Some(file) = &cli.file {
+                process_file(file);
+            } else {
+                let exts: &[&str] = match cli.command {
+                    Commands::Encrypt => &["png", "ogg", "m4a"],
+                    Commands::Decrypt => &["rpgmvp", "rpgmvo", "rpgmvm", "ogg_", "png_", "m4a_"],
                     _ => unreachable!(),
                 };
-                (decrypted, new_ext)
+                for entry in read_dir(&cli.input_dir).unwrap().flatten() {
+                    let path: PathBuf = entry.path();
+                    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                        if exts.contains(&ext) {
+                            process_file(&path);
+                        }
+                    }
+                }
             }
-            _ => unreachable!(),
-        };
-
-        let output_file: PathBuf = cli
-            .output_dir
-            .join(PathBuf::from(path.file_name().unwrap()).with_extension(new_ext));
-
-        write(output_file, processed_data).unwrap();
+        }
     }
 }
