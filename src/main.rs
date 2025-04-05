@@ -1,4 +1,4 @@
-use asset_decrypter::Decrypter;
+use asset_decrypter::{DEFAULT_KEY, Decrypter};
 use clap::{Parser, Subcommand, crate_version, value_parser};
 use std::{
     fs::{read, read_dir, read_to_string, write},
@@ -6,17 +6,15 @@ use std::{
     process::exit,
 };
 
-const DEFAULT_KEY: &str = "d41d8cd98f00b204e9800998ecf8427e";
-
 #[derive(Parser)]
-#[command(version = crate_version!(), about = "Decrypt/encrypt RPG Maker MV/MZ audio and image assets.")]
+#[command(version = crate_version!(), about = "Decrypt/encrypt RPG Maker MV/MZ audio and image assets.", next_line_help = true)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
     /// Encryption key for encrypt/decrypt operations
     #[arg(short = 'e', long, global = true)]
     key: Option<String>,
-    /// Game engine ("mv" or "mz")
+    /// Game engine
     #[arg(short = 'E', long, value_parser = ["mv", "mz"], global = true)]
     engine: Option<String>,
     /// Input directory
@@ -32,8 +30,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Decrypts encrypted assets.
+    /// .rpgmvo/.ogg_ => .ogg
+    /// .rpgmvp/.png_ => .png
+    /// .rpgmvm/.m4a_ => .m4a
     Encrypt,
+    /// Encrypts .png/.ogg/m4a assets.
+    /// .ogg => .rpgmvo/.ogg_
+    /// .png => .rpgmvp/.png_
+    /// .m4a => .rpgmvm/.m4a_
     Decrypt,
+    /// Extracts key from file, specified in --file argument.
     ExtractKey,
 }
 
