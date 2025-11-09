@@ -44,6 +44,14 @@ struct Cli {
 
 #[derive(Subcommand, EnumIs)]
 enum Commands {
+    /// Encrypts .png/.ogg/.m4a assets. Requires `--engine` argument to be set
+    ///
+    /// .ogg => .rpgmvo/.ogg_
+    ///
+    /// .png => .rpgmvp/.png_
+    ///
+    /// .m4a => .rpgmvm/.m4a_
+    Encrypt,
     /// Decrypts encrypted assets.
     ///
     /// .rpgmvo/.ogg_ => .ogg
@@ -51,16 +59,8 @@ enum Commands {
     /// .rpgmvp/.png_ => .png
     ///
     /// .rpgmvm/.m4a_ => .m4a
-    Encrypt,
-    /// Encrypts .png/.ogg/.m4a assets.
-    ///
-    /// .ogg => .rpgmvo/.ogg_
-    ///
-    /// .png => .rpgmvp/.png_
-    ///
-    /// .m4a => .rpgmvm/.m4a_
     Decrypt,
-    /// Extracts key from file, specified in --file argument.
+    /// Extracts key from file, specified in --file argument. Key can only be extracted from System.json, .rpgmvp and .png_ files.
     ExtractKey,
 }
 
