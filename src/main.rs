@@ -74,14 +74,29 @@ fn main() -> Result<()> {
 
     let mut decrypter = Decrypter::new();
 
-    if cli.key.is_none() && cli.command.is_encrypt() {
-        unsafe { decrypter.set_key_from_str(DEFAULT_KEY).unwrap_unchecked() }
-    } else {
-        decrypter.set_key_from_str(
-            cli.key
-                .context("--key argument is not specified.")?
-                .as_str(),
-        )?
+    if cli.command.is_decrypt() {
+        if let Some(key) = &cli.key {
+            unsafe {
+                decrypter.set_key_from_str(key).unwrap_unchecked();
+            }
+        } else {
+            println!(
+                "--key argument is not specified. Using default key - decrypted files may not be valid."
+            );
+            unsafe {
+                decrypter.set_key_from_str(DEFAULT_KEY).unwrap_unchecked();
+            }
+        }
+    } else if cli.command.is_encrypt() {
+        if let Some(key) = &cli.key {
+            decrypter.set_key_from_str(key)?;
+        } else {
+            bail!("--key argument is not specified.");
+        }
+
+        if cli.engine.is_none() {
+            bail!("--engine argument is not specified.");
+        }
     };
 
     if cli.command.is_extract_key() {
@@ -102,12 +117,11 @@ fn main() -> Result<()> {
             unsafe { system_value["encryptionKey"].as_str().unwrap_unchecked() }
         } else if ["rpgmvp", "png_"].contains(&extension) {
             let file_data = read(&file_path)?;
-
             decrypter.set_key_from_image(&file_data);
             unsafe { decrypter.key().unwrap_unchecked() }
         } else {
             bail!(
-                "Key can be extracted only from `System.json` file or `.rpgmvp`/`png_` file."
+                "Key can be extracted only from `System.json` file or `.rpgmvp`/`.png_` file."
             );
         };
 
@@ -115,8 +129,6 @@ fn main() -> Result<()> {
     } else {
         let output_dir =
             cli.output_dir.unwrap_or_else(|| cli.input_dir.clone());
-        let engine =
-            cli.engine.context("--engine argument is not specified.")?;
 
         let mut process_file = |file: &PathBuf,
                                 extension: &str|
@@ -125,6 +137,60 @@ fn main() -> Result<()> {
 
             let (processed, new_extension) = if cli.command.is_decrypt() {
                 let decrypted = decrypter.decrypt(&file_data);
+                let key = unsafe { cli.key.as_ref().unwrap_unchecked() };
+
+                match extension {
+                    "rpgmvp" | "png_" => {
+                        // PNG: 89 50 4E 47 0D 0A 1A 0A
+                        let png_signature =
+                            &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+                        if decrypted.len() < png_signature.len()
+                            || &decrypted[..8] != png_signature
+                        {
+                            bail!(
+                                "Decrypted PNG file has invalid signature. {}",
+                                if key == DEFAULT_KEY {
+                                    "Instead of using default key, extract key from game files using `extract-key` command, and then supply it using `--key` argument in decryption."
+                                } else {
+                                    "Check if you supplied correct key in `--key` argument."
+                                }
+                            );
+                        }
+                    }
+                    "rpgmvo" | "ogg_" => {
+                        // OGG: 4F 67 67 53
+                        let ogg_signature = b"OggS";
+                        if decrypted.len() < ogg_signature.len()
+                            || &decrypted[..4] != ogg_signature
+                        {
+                            bail!(
+                                "Decrypted OGG file has invalid signature. {}",
+                                if key == DEFAULT_KEY {
+                                    "Instead of using default key, extract key from game files using `extract-key` command, and then supply it using `--key` argument in decryption."
+                                } else {
+                                    "Check if you supplied correct key in `--key` argument."
+                                }
+                            );
+                        }
+                    }
+                    "rpgmvm" | "m4a_" => {
+                        // M4A: 00 00 00 ?? 66 74 79 70 4D 34 41 20 (ftypM4A)
+                        if decrypted.len() < 12
+                            || &decrypted[4..8] != b"ftyp"
+                            || &decrypted[8..12] != b"M4A "
+                        {
+                            bail!(
+                                "Decrypted M4A file has invalid signature. {}",
+                                if key == DEFAULT_KEY {
+                                    "Instead of using default key, extract key from game files using `extract-key` command, and then supply it using `--key` argument in decryption."
+                                } else {
+                                    "Check if you supplied correct key in `--key` argument."
+                                }
+                            );
+                        }
+                    }
+                    _ => unreachable!(),
+                }
 
                 let new_extension = match extension {
                     "rpgmvp" | "png_" => "png",
@@ -136,6 +202,7 @@ fn main() -> Result<()> {
                 (decrypted, new_extension)
             } else {
                 let encrypted = decrypter.encrypt(&file_data)?;
+                let engine = unsafe { cli.engine.unwrap_unchecked() };
 
                 let new_extension = match (engine, extension) {
                     (Engine::MV, "png") => "rpgmvp",
@@ -166,10 +233,10 @@ fn main() -> Result<()> {
         };
 
         if let Some(file) = &cli.file {
-            if let Some(extension) = file.extension().and_then(|e| e.to_str()) {
-                if allowed_extensions.contains(&extension) {
-                    process_file(file, extension)?;
-                }
+            if let Some(extension) = file.extension().and_then(|e| e.to_str())
+                && allowed_extensions.contains(&extension)
+            {
+                process_file(file, extension)?;
             }
         } else {
             for entry in read_dir(&cli.input_dir)?.flatten() {
@@ -177,10 +244,9 @@ fn main() -> Result<()> {
 
                 if let Some(extension) =
                     path.extension().and_then(|e| e.to_str())
+                    && allowed_extensions.contains(&extension)
                 {
-                    if allowed_extensions.contains(&extension) {
-                        process_file(&path, extension)?;
-                    }
+                    process_file(&path, extension)?;
                 }
             }
         }
