@@ -1,10 +1,19 @@
-use anyhow::{Context, Result, bail};
-use asset_decrypter::{DEFAULT_KEY, Decrypter};
+#![warn(clippy::all, clippy::pedantic)]
+#![allow(clippy::needless_doctest_main)]
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_possible_wrap)]
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::deref_addrof)]
+
+use anyhow::{Result, bail};
+use asset_decrypter::{Decrypter, FileType, HEADER_LENGTH, RPGM_HEADER};
 use clap::{Parser, Subcommand, ValueEnum, value_parser};
 use serde_json::{Value, from_str};
 use std::{
-    fs::{read, read_dir, read_to_string, write},
-    path::PathBuf,
+    ffi::OsStr,
+    fs::{File, read, read_dir, read_to_string, write},
+    io::{IoSlice, Write},
+    path::{Path, PathBuf},
     time::Instant,
 };
 use strum_macros::EnumIs;
@@ -24,11 +33,11 @@ pub enum Engine {
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
-    /// Encryption key for encrypt/decrypt operations
+    command: Command,
+    /// Encryption key for encryption/decryption. Decrypt command automatically finds the key from processed files, so you probably don't need to set it when decrypting.
     #[arg(short = 'e', long, global = true)]
     key: Option<String>,
-    /// Game engine
+    /// Game engine - `mv` or `mz`. Required for encryption
     #[arg(short = 'E', long, global = true)]
     engine: Option<Engine>,
     /// Input directory
@@ -38,13 +47,13 @@ struct Cli {
     #[arg(short, long, value_parser = value_parser!(PathBuf), hide_default_value = true, global = true)]
     output_dir: Option<PathBuf>,
     /// File path (for single file processing or key extraction)
-    #[arg(short, long, value_parser = value_parser!(PathBuf), global = true)]
+    #[arg(short, long, value_parser = value_parser!(PathBuf), global = true, conflicts_with = "input_dir")]
     file: Option<PathBuf>,
 }
 
-#[derive(Subcommand, EnumIs)]
-enum Commands {
-    /// Encrypts .png/.ogg/.m4a assets. Requires `--engine` argument to be set
+#[derive(Subcommand, EnumIs, Clone, Copy)]
+enum Command {
+    /// Encrypts .png/.ogg/.m4a assets. Requires `--engine` and `--key` arguments to be set
     ///
     /// .ogg => .rpgmvo/.ogg_
     ///
@@ -52,7 +61,7 @@ enum Commands {
     ///
     /// .m4a => .rpgmvm/.m4a_
     Encrypt,
-    /// Decrypts encrypted assets.
+    /// Decrypts encrypted assets. Automatically deduces the key for each processed file
     ///
     /// .rpgmvo/.ogg_ => .ogg
     ///
@@ -60,197 +69,227 @@ enum Commands {
     ///
     /// .rpgmvm/.m4a_ => .m4a
     Decrypt,
-    /// Extracts key from file, specified in --file argument. Key can only be extracted from System.json, .rpgmvp and .png_ files.
+    /// Extracts key from file, specified in --file argument. Key can only be extracted from System.json file or RPG Maker encrypted file.
     ExtractKey,
 }
 
-const DECRYPT_EXTENSIONS: &[&str] =
-    &["rpgmvp", "rpgmvo", "rpgmvm", "ogg_", "png_", "m4a_"];
-const ENCRYPT_EXTENSIONS: &[&str] = &["png", "ogg", "m4a"];
+const MV_PNG_EXT: &str = "rpgmvp";
+const MV_OGG_EXT: &str = "rpgmvo";
+const MV_M4A_EXT: &str = "rpgmvm";
 
-fn main() -> Result<()> {
-    let start_time = Instant::now();
-    let cli = Cli::parse();
+const MZ_PNG_EXT: &str = "png_";
+const MZ_OGG_EXT: &str = "ogg_";
+const MZ_M4A_EXT: &str = "m4a_";
 
-    let mut decrypter = Decrypter::new();
+const PNG_EXT: &str = "png";
+const OGG_EXT: &str = "ogg";
+const M4A_EXT: &str = "m4a";
 
-    if cli.command.is_decrypt() {
-        if let Some(key) = &cli.key {
-            unsafe {
-                decrypter.set_key_from_str(key).unwrap_unchecked();
+const DECRYPT_EXTENSIONS: &[&str] = &[
+    MV_PNG_EXT, MV_OGG_EXT, MV_M4A_EXT, MZ_PNG_EXT, MZ_OGG_EXT, MZ_M4A_EXT,
+];
+const ENCRYPT_EXTENSIONS: &[&str] = &[PNG_EXT, OGG_EXT, M4A_EXT];
+
+struct Processor<'a> {
+    decrypter: Decrypter,
+    command: Command,
+    engine: Engine,
+    output_dir: &'a Path,
+    input_dir: &'a Path,
+    file: Option<&'a PathBuf>,
+    global_key_set: bool,
+}
+
+impl<'a> Processor<'a> {
+    pub fn new(cli: &'a Cli) -> Result<Self, anyhow::Error> {
+        let mut decrypter = Decrypter::new();
+        let mut engine: Engine = Engine::MV;
+
+        if let Some(file) = &cli.file {
+            if !file.is_file() {
+                bail!("--file argument expects file as its argument.");
             }
-        } else {
-            println!(
-                "--key argument is not specified. Using default key - decrypted files may not be valid."
-            );
-            unsafe {
-                decrypter.set_key_from_str(DEFAULT_KEY).unwrap_unchecked();
-            }
+        } else if cli.command.is_extract_key() {
+            bail!("--file argument is not specified.");
         }
-    } else if cli.command.is_encrypt() {
+
         if let Some(key) = &cli.key {
             decrypter.set_key_from_str(key)?;
-        } else {
+        } else if cli.command.is_encrypt() {
             bail!("--key argument is not specified.");
         }
 
-        if cli.engine.is_none() {
+        if let Some(eng) = cli.engine {
+            engine = eng;
+        } else if cli.command.is_encrypt() {
             bail!("--engine argument is not specified.");
         }
-    };
 
-    if cli.command.is_extract_key() {
-        let file_path =
-            cli.file.context("--file argument is not specified.")?;
-        let extension = file_path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .context("--file argument expects file as its value.")?;
+        let output_dir = cli.output_dir.as_ref().unwrap_or(&cli.input_dir);
+
+        Ok(Self {
+            decrypter,
+            command: cli.command,
+            engine,
+            output_dir,
+            input_dir: &cli.input_dir,
+            file: cli.file.as_ref(),
+            global_key_set: cli.key.is_some(),
+        })
+    }
+
+    fn process_file(
+        &mut self,
+        file: &Path,
+        extension: &str,
+    ) -> Result<(), anyhow::Error> {
+        let mut file_data = read(file)?;
+
+        let new_extension = if self.command.is_decrypt() {
+            let file_type = FileType::from(extension);
+
+            // This is unlikely, but if we processing a directory when files have different encryption keys, we need to always reset the key
+            if !self.global_key_set {
+                self.decrypter.set_key_from_file(&file_data, file_type)?;
+            }
+
+            let sliced =
+                self.decrypter.decrypt_in_place(&mut file_data, file_type)?;
+
+            match extension {
+                MV_PNG_EXT | MZ_PNG_EXT => {
+                    if !sliced.starts_with(b"\x89PNG\r\n\x1a\n") {
+                        bail!(
+                            "Decrypted PNG file has invalid signature. Check if you supplied correct key in `--key` argument."
+                        );
+                    }
+                }
+                MV_OGG_EXT | MZ_OGG_EXT => {
+                    const OGG_SIGNATURE: &[u8] = b"OggS";
+                    if !sliced.starts_with(OGG_SIGNATURE) {
+                        bail!(
+                            "Decrypted OGG file has invalid signature. Check if you supplied correct key in `--key` argument."
+                        );
+                    }
+                }
+                MV_M4A_EXT | MZ_M4A_EXT => {
+                    if sliced.len() < 12 || &sliced[4..8] != b"ftyp" {
+                        bail!(
+                            "Decrypted M4A file has invalid signature. Check if you supplied correct key in `--key` argument."
+                        );
+                    }
+                }
+                _ => unreachable!(),
+            }
+
+            match extension {
+                MV_PNG_EXT | MZ_PNG_EXT => PNG_EXT,
+                MV_OGG_EXT | MZ_OGG_EXT => OGG_EXT,
+                MV_M4A_EXT | MZ_M4A_EXT => M4A_EXT,
+                _ => unreachable!(),
+            }
+        } else {
+            self.decrypter.encrypt_in_place(&mut file_data)?;
+
+            match (self.engine, extension) {
+                (Engine::MV, PNG_EXT) => MV_PNG_EXT,
+                (Engine::MV, OGG_EXT) => MV_OGG_EXT,
+                (Engine::MV, M4A_EXT) => MV_M4A_EXT,
+                (Engine::MZ, PNG_EXT) => MZ_PNG_EXT,
+                (Engine::MZ, OGG_EXT) => MZ_OGG_EXT,
+                (Engine::MZ, M4A_EXT) => MZ_M4A_EXT,
+                _ => unreachable!(),
+            }
+        };
+
+        let output_file_name =
+            PathBuf::from(unsafe { file.file_name().unwrap_unchecked() })
+                .with_extension(new_extension);
+
+        let output_file_path = self.output_dir.join(output_file_name);
+
+        if self.command.is_decrypt() {
+            write(output_file_path, &file_data[HEADER_LENGTH..])?;
+        } else {
+            let mut output_file = File::create(output_file_path)?;
+            let bufs = [IoSlice::new(&RPGM_HEADER), IoSlice::new(&file_data)];
+            let _ = output_file.write_vectored(&bufs)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn extract_key(&mut self) -> Result<(), anyhow::Error> {
+        let file_path = unsafe { self.file.unwrap_unchecked() };
+        let extension = unsafe {
+            file_path
+                .extension()
+                .and_then(OsStr::to_str)
+                .unwrap_unchecked()
+        };
         let filename = unsafe { file_path.file_name().unwrap_unchecked() };
         let system_value: Value;
 
         let key = if filename == "System.json" {
-            let system_file_content = read_to_string(&file_path)?;
+            let system_file_content = read_to_string(file_path)?;
 
-            system_value =
-                unsafe { from_str(&system_file_content).unwrap_unchecked() };
-            unsafe { system_value["encryptionKey"].as_str().unwrap_unchecked() }
-        } else if ["rpgmvp", "png_"].contains(&extension) {
-            let file_data = read(&file_path)?;
-            decrypter.set_key_from_image(&file_data);
-            unsafe { decrypter.key().unwrap_unchecked() }
+            system_value = from_str(&system_file_content)?;
+            system_value["encryptionKey"].as_str().unwrap()
+        } else if DECRYPT_EXTENSIONS.contains(&extension) {
+            let file_data = read(file_path)?;
+            self.decrypter
+                .set_key_from_file(&file_data, FileType::from(extension))?
         } else {
             bail!(
-                "Key can be extracted only from `System.json` file or `.rpgmvp`/`.png_` file."
+                "Key can be extracted only from `System.json` file or RPG Maker encrypted file."
             );
         };
 
         println!("Encryption key: {key}");
-    } else {
-        let output_dir =
-            cli.output_dir.unwrap_or_else(|| cli.input_dir.clone());
+        Ok(())
+    }
 
-        let mut process_file = |file: &PathBuf,
-                                extension: &str|
-         -> Result<()> {
-            let file_data = read(file)?;
-
-            let (processed, new_extension) = if cli.command.is_decrypt() {
-                let decrypted = decrypter.decrypt(&file_data);
-                let key = unsafe { cli.key.as_ref().unwrap_unchecked() };
-
-                match extension {
-                    "rpgmvp" | "png_" => {
-                        // PNG: 89 50 4E 47 0D 0A 1A 0A
-                        let png_signature =
-                            &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
-                        if decrypted.len() < png_signature.len()
-                            || &decrypted[..8] != png_signature
-                        {
-                            bail!(
-                                "Decrypted PNG file has invalid signature. {}",
-                                if key == DEFAULT_KEY {
-                                    "Instead of using default key, extract key from game files using `extract-key` command, and then supply it using `--key` argument in decryption."
-                                } else {
-                                    "Check if you supplied correct key in `--key` argument."
-                                }
-                            );
-                        }
-                    }
-                    "rpgmvo" | "ogg_" => {
-                        // OGG: 4F 67 67 53
-                        let ogg_signature = b"OggS";
-                        if decrypted.len() < ogg_signature.len()
-                            || &decrypted[..4] != ogg_signature
-                        {
-                            bail!(
-                                "Decrypted OGG file has invalid signature. {}",
-                                if key == DEFAULT_KEY {
-                                    "Instead of using default key, extract key from game files using `extract-key` command, and then supply it using `--key` argument in decryption."
-                                } else {
-                                    "Check if you supplied correct key in `--key` argument."
-                                }
-                            );
-                        }
-                    }
-                    "rpgmvm" | "m4a_" => {
-                        // M4A: 00 00 00 ?? 66 74 79 70 4D 34 41 20 (ftypM4A)
-                        if decrypted.len() < 12
-                            || &decrypted[4..8] != b"ftyp"
-                            || &decrypted[8..12] != b"M4A "
-                        {
-                            bail!(
-                                "Decrypted M4A file has invalid signature. {}",
-                                if key == DEFAULT_KEY {
-                                    "Instead of using default key, extract key from game files using `extract-key` command, and then supply it using `--key` argument in decryption."
-                                } else {
-                                    "Check if you supplied correct key in `--key` argument."
-                                }
-                            );
-                        }
-                    }
-                    _ => unreachable!(),
-                }
-
-                let new_extension = match extension {
-                    "rpgmvp" | "png_" => "png",
-                    "rpgmvo" | "ogg_" => "ogg",
-                    "rpgmvm" | "m4a_" => "m4a",
-                    _ => unreachable!(),
-                };
-
-                (decrypted, new_extension)
+    pub fn process(&mut self) -> Result<(), anyhow::Error> {
+        if self.command.is_extract_key() {
+            self.extract_key()?;
+        } else {
+            let allowed_extensions = if self.command.is_encrypt() {
+                ENCRYPT_EXTENSIONS
             } else {
-                let encrypted = decrypter.encrypt(&file_data)?;
-                let engine = unsafe { cli.engine.unwrap_unchecked() };
-
-                let new_extension = match (engine, extension) {
-                    (Engine::MV, "png") => "rpgmvp",
-                    (Engine::MV, "ogg") => "rpgmvo",
-                    (Engine::MV, "m4a") => "rpgmvm",
-                    (Engine::MZ, "png") => "png_",
-                    (Engine::MZ, "ogg") => "ogg_",
-                    (Engine::MZ, "m4a") => "m4a_",
-                    _ => unreachable!(),
-                };
-
-                (encrypted, new_extension)
+                DECRYPT_EXTENSIONS
             };
 
-            let output_file_name =
-                PathBuf::from(unsafe { file.file_name().unwrap_unchecked() })
-                    .with_extension(new_extension);
-
-            let output_file_path = output_dir.join(output_file_name);
-            write(output_file_path, processed)?;
-            Ok(())
-        };
-
-        let allowed_extensions = if cli.command.is_encrypt() {
-            ENCRYPT_EXTENSIONS
-        } else {
-            DECRYPT_EXTENSIONS
-        };
-
-        if let Some(file) = &cli.file {
-            if let Some(extension) = file.extension().and_then(|e| e.to_str())
-                && allowed_extensions.contains(&extension)
-            {
-                process_file(file, extension)?;
-            }
-        } else {
-            for entry in read_dir(&cli.input_dir)?.flatten() {
-                let path = entry.path();
-
+            if let Some(file) = &self.file {
                 if let Some(extension) =
-                    path.extension().and_then(|e| e.to_str())
+                    file.extension().and_then(OsStr::to_str)
                     && allowed_extensions.contains(&extension)
                 {
-                    process_file(&path, extension)?;
+                    self.process_file(file, extension)?;
+                }
+            } else {
+                for entry in read_dir(self.input_dir)?.flatten() {
+                    let path = entry.path();
+
+                    if let Some(extension) =
+                        path.extension().and_then(OsStr::to_str)
+                        && allowed_extensions.contains(&extension)
+                    {
+                        self.process_file(&path, extension)?;
+                    }
                 }
             }
         }
+
+        Ok(())
     }
+}
+
+fn main() -> Result<()> {
+    let start_time = Instant::now();
+
+    let cli = Cli::parse();
+    let mut processor = Processor::new(&cli)?;
+    processor.process()?;
 
     println!("Elapsed: {:.2}s", start_time.elapsed().as_secs_f32());
     Ok(())

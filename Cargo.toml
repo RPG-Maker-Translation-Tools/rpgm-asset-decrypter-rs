@@ -1,12 +1,12 @@
 [package]
 name = "rpgmasd"
-version = "2.1.1"
+version = "3.0.0"
 edition = "2024"
 
 [dependencies]
-clap = { version = "4.5.51", features = ["cargo", "derive"] }
+clap = { version = "4.5.53", features = ["cargo", "derive"] }
 clap_derive = "4.5.49"
-asset-decrypter = { package = "rpgm-asset-decrypter-lib", version = "2.1.1" }
+asset-decrypter = { package = "rpgm-asset-decrypter-lib", version = "3.0.2" }
 anyhow = "1.0.100"
 serde_json = "1.0.145"
 strum_macros = "0.27.2"
