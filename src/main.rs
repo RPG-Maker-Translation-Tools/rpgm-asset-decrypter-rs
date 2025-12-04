@@ -11,8 +11,7 @@ use clap::{Parser, Subcommand, ValueEnum, value_parser};
 use serde_json::{Value, from_str};
 use std::{
     ffi::OsStr,
-    fs::{File, read, read_dir, read_to_string, write},
-    io::{IoSlice, Write},
+    fs::{read, read_dir, read_to_string, write},
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -38,7 +37,7 @@ struct Cli {
     #[arg(short = 'e', long, global = true)]
     key: Option<String>,
     /// Game engine - `mv` or `mz`. Required for encryption
-    #[arg(short = 'E', long, global = true)]
+    #[arg(short = 'E', long, global = true, value_parser = ["mv", "mz"])]
     engine: Option<Engine>,
     /// Input directory
     #[arg(short, long, default_value = "./", value_parser = value_parser!(PathBuf), hide_default_value = true, global = true)]
@@ -61,6 +60,7 @@ enum Command {
     ///
     /// .m4a => .rpgmvm/.m4a_
     Encrypt,
+
     /// Decrypts encrypted assets. Automatically deduces the key for each processed file
     ///
     /// .rpgmvo/.ogg_ => .ogg
@@ -69,6 +69,7 @@ enum Command {
     ///
     /// .rpgmvm/.m4a_ => .m4a
     Decrypt,
+
     /// Extracts key from file, specified in --file argument. Key can only be extracted from System.json file or RPG Maker encrypted file.
     ExtractKey,
 }
@@ -103,7 +104,7 @@ struct Processor<'a> {
 impl<'a> Processor<'a> {
     pub fn new(cli: &'a Cli) -> Result<Self, anyhow::Error> {
         let mut decrypter = Decrypter::new();
-        let mut engine: Engine = Engine::MV;
+        let mut engine = Engine::MV;
 
         if let Some(file) = &cli.file {
             if !file.is_file() {
@@ -146,7 +147,7 @@ impl<'a> Processor<'a> {
         let mut file_data = read(file)?;
 
         let new_extension = if self.command.is_decrypt() {
-            let file_type = FileType::from(extension);
+            let file_type = FileType::try_from(extension).unwrap();
 
             // This is unlikely, but if we processing a directory when files have different encryption keys, we need to always reset the key
             if !self.global_key_set {
@@ -211,9 +212,12 @@ impl<'a> Processor<'a> {
         if self.command.is_decrypt() {
             write(output_file_path, &file_data[HEADER_LENGTH..])?;
         } else {
-            let mut output_file = File::create(output_file_path)?;
-            let bufs = [IoSlice::new(&RPGM_HEADER), IoSlice::new(&file_data)];
-            let _ = output_file.write_vectored(&bufs)?;
+            let mut output_data =
+                Vec::with_capacity(RPGM_HEADER.len() + file_data.len());
+            output_data.extend(RPGM_HEADER);
+            output_data.extend(file_data);
+
+            write(output_file_path, output_data)?;
         }
 
         Ok(())
@@ -237,8 +241,10 @@ impl<'a> Processor<'a> {
             system_value["encryptionKey"].as_str().unwrap()
         } else if DECRYPT_EXTENSIONS.contains(&extension) {
             let file_data = read(file_path)?;
-            self.decrypter
-                .set_key_from_file(&file_data, FileType::from(extension))?
+            self.decrypter.set_key_from_file(
+                &file_data,
+                FileType::try_from(extension).unwrap(),
+            )?
         } else {
             bail!(
                 "Key can be extracted only from `System.json` file or RPG Maker encrypted file."
