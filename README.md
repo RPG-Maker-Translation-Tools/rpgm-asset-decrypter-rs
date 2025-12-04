@@ -18,6 +18,8 @@ rpgmasd decrypt -i "./rpg-maker-mv-game/www/img/tilesets"
 
 # Decrypt a single file in a directory
 rpgmasd decrypt --file image.rpgmvp
+rpgmasd decrypt --file audio.rpgmvo
+rpgmasd decrypt --file audio.m4a_
 
 # You can extract encryption key from any encrypted file
 rpgmasd extract-key --file image.rpgmvp
@@ -25,6 +27,16 @@ rpgmasd extract-key --file image.rpgmvp
 # `encrypt` command requires `--engine` and `--key` arguments
 rpgmasd encrypt --engine mv --key d41d8cd98f00b204e9800998ecf8427e -i "./images"
 ```
+
+## GUI
+
+Our [rpgmdec](https://github.com/rpg-maker-translation-tools/rpgmdec) GUI provides the same functionality as `rpgmasd`.
+
+## Building
+
+Requirements: `rustup` with installed Rust toolchain.
+
+Clone the repository and compile with `cargo b -r`.
 
 ## License
 
