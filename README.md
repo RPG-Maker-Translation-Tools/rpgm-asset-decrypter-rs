@@ -30,7 +30,7 @@ rpgmasd encrypt --engine mv --key d41d8cd98f00b204e9800998ecf8427e -i "./images"
 
 ## GUI
 
-Our [rpgmdec](https://github.com/rpg-maker-translation-tools/rpgmdec) GUI provides the same functionality as `rpgmasd`.
+Our [rpgmdec](https://github.com/RPG-Maker-Translation-Tools/rpgmdec) GUI provides the same functionality as `rpgmasd`.
 
 ## Building
 
