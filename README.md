@@ -16,7 +16,9 @@ Get the binaries in Releases section.
 # Decrypt all files in a directory. You don't need to set a key for this - program will automatically extract it from processed files
 rpgmasd decrypt -i "./rpg-maker-mv-game/www/img/tilesets"
 
-# Decrypt a single file in a directory
+# Directory mode is not recursive - point `-i` at the directory that directly contains the assets, and repeat for each subdirectory
+
+# Decrypt a single file. Output goes next to it, unless `--output-dir` is set
 rpgmasd decrypt --file image.rpgmvp
 rpgmasd decrypt --file audio.rpgmvo
 rpgmasd decrypt --file audio.m4a_
@@ -44,12 +46,11 @@ Clone the repository and compile with `cargo b -r`.
 
 If you could, please consider supporting us through:
 
--   [Ko-fi](https://ko-fi.com/savannstm)
--   [Patreon](https://www.patreon.com/cw/savannstm)
--   [Boosty](https://boosty.to/mcdeimos)
+- [Boosty](https://boosty.to/mcdeimos) (has lower fees)
+- [Ko-fi](https://ko-fi.com/savannstm)
 
-Even if you don't, it's fine. We'll continue to do as we right now.
+Even if you don't, we will still continue working on the project anyways.
 
 ## License
 
-Project is licensed under WTFPL.
+Project is licensed under [WTFPL](https://www.wtfpl.net/).
